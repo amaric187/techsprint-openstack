@@ -48,6 +48,18 @@
         is_public: true
       tags: [global]
 
+    - name: Create Academy capacity-saver flavor
+      os_nova_flavor:
+        auth: "{{ admin_auth }}"
+        state: present
+        name: "{{ small_flavor_name }}"
+        ram: 2048
+        vcpus: 1
+        disk: 10
+        ephemeral: 0
+        is_public: true
+      tags: [global]
+
     - name: Check Manila share type
       command: "manila type-show {{ share_type }}"
       register: share_type_check
@@ -96,4 +108,3 @@
       debug:
         var: verification.stdout_lines
       tags: [verify]
-

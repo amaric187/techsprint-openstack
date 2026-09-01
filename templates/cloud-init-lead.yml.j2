@@ -1,4 +1,6 @@
 #cloud-config
+bootcmd:
+  - [bash, -lc, "getent passwd techsprint >/dev/null || useradd -m -G wheel -s /bin/bash techsprint"]
 users:
   - default
   - name: techsprint
@@ -26,7 +28,7 @@ write_files:
       source /home/techsprint/lead-openrc
       ACTION="${1:-list}"
       case "$ACTION" in list|start|stop|reboot) ;; *) echo "Upotreba: $0 list|start|stop|reboot"; exit 2;; esac
-      {% for dev in developers %}
+{% for dev in developers %}
       echo "=== {{ dev.slug }} ==="
       export OS_PROJECT_NAME="prj-{{ prefix }}-{{ dev.slug }}"
       if [[ "$ACTION" == list ]]; then
@@ -34,7 +36,7 @@ write_files:
       else
         for id in $(openstack server list -f value -c ID); do openstack server "$ACTION" "$id"; done
       fi
-      {% endfor %}
+{% endfor %}
   - path: /home/techsprint/lead-openrc
     owner: techsprint:techsprint
     permissions: '0600'
@@ -47,5 +49,6 @@ write_files:
       export OS_PROJECT_DOMAIN_NAME='Default'
       export OS_PROJECT_NAME='prj-{{ prefix }}-lead'
 runcmd:
+  - [bash, -lc, "chown -R techsprint:techsprint /home/techsprint/.ssh && chmod 700 /home/techsprint/.ssh && chmod 600 /home/techsprint/.ssh/id_rsa"]
   - [bash, -lc, "dnf -y install python3-openstackclient || true"]
 final_message: "TECHSPRINT_LEAD_READY"

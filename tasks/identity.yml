@@ -59,7 +59,7 @@
     state: present
     name: "grp-{{ prefix }}-leads"
     description: "Team Leads with project-scoped VM power access"
-    domain: Default
+    domain_id: default
 
 - name: Add Team Lead user to Team Lead group
   os_user_group:
@@ -82,7 +82,7 @@
     state: present
     name: "grp-{{ prefix }}-{{ item.slug }}"
     description: "Developer group for {{ item.display_name }}"
-    domain: Default
+    domain_id: default
   loop: "{{ developers }}"
   loop_control:
     label: "{{ item.slug }}"

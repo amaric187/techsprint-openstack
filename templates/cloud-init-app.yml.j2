@@ -11,8 +11,8 @@ write_files:
   - path: /etc/techsprint/swift.env
     permissions: '0600'
     content: |
-      OS_AUTH_URL={{ lookup('env', 'OS_AUTH_URL') }}
-      OS_AUTH_VERSION=3
+      OS_AUTH_URL={{ swift_auth_url }}
+      ST_AUTH_VERSION=3
       OS_USERNAME={{ developer.storage_username }}
       OS_PASSWORD={{ developer.storage_password }}
       OS_PROJECT_NAME={{ dev_project }}
@@ -64,14 +64,18 @@ write_files:
         grep -q '/srv/moodle' /etc/fstab || echo "$DEV /srv/moodle xfs defaults,nofail 0 2" >> /etc/fstab
         mount /srv/moodle || true
       fi
-      dnf -y install httpd curl tar unzip php php-cli php-mysqlnd php-gd php-xml php-mbstring fuse3 ceph-common || true
+      dnf -y install httpd curl tar unzip php php-cli php-mysqlnd php-gd php-xml php-mbstring fuse3
+      dnf -y install ceph-common || true
       mkdir -p /mnt/moodle-object /mnt/moodle-backup
-      grep -q '/mnt/moodle-backup' /etc/fstab || echo '{{ dev_share_export }} /mnt/moodle-backup ceph name={{ dev_share_access_name }},secretfile=/etc/ceph/techsprint.secret,_netdev,nofail 0 0' >> /etc/fstab
-      mount /mnt/moodle-backup || true
+      if command -v mount.ceph >/dev/null 2>&1; then
+        grep -q '/mnt/moodle-backup' /etc/fstab || echo '{{ dev_share_export }} /mnt/moodle-backup ceph name={{ dev_share_access_name }},secretfile=/etc/ceph/techsprint.secret,_netdev,nofail 0 0' >> /etc/fstab
+        mount /mnt/moodle-backup || true
+      else
+        echo '[WARN] Ceph client nije dostupan; Manila share ostaje provisioniran bez guest mounta.'
+      fi
       if [[ ! -x /usr/local/bin/rclone ]]; then
         curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip || true
-        if [[ -s /tmp/rclone.zip ]]; then
-          unzip -qo /tmp/rclone.zip -d /tmp/rclone
+        if [[ -s /tmp/rclone.zip ]] && unzip -qo /tmp/rclone.zip -d /tmp/rclone; then
           install -m 0755 /tmp/rclone/rclone-*/rclone /usr/local/bin/rclone
         fi
       fi

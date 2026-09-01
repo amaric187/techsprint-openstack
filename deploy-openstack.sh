@@ -113,6 +113,9 @@ if len({u["slug"] for u in users}) != len(users):
 with open(public_key_path, "r", encoding="utf-8") as handle:
     public_key = handle.read().strip()
 
+auth_url = os.environ["OS_AUTH_URL"].rstrip("/")
+swift_auth_url = auth_url if auth_url.endswith("/v3") else auth_url + "/v3"
+
 config = {
     "prefix": "techsprint-tst",
     "environment_name": "testing",
@@ -121,6 +124,7 @@ config = {
     "db_image": "rhel8-db",
     "lead_image": "rhel8",
     "flavor_name": "flv-techsprint-app",
+    "small_flavor_name": "flv-techsprint-lab-small",
     "volume_type": "tripleo",
     "share_type": "techsprint-cephfs",
     "share_backend": "cephfs",
@@ -128,6 +132,7 @@ config = {
     "developers": developers,
     "all_users": users,
     "lead_public_key": public_key,
+    "swift_auth_url": swift_auth_url,
 }
 
 for path, data in ((secrets_path, saved), (config_path, config)):

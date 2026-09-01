@@ -170,20 +170,20 @@
   when: dev_share_check.rc != 0
 
 - name: Wait for developer CephFS share
-  command: "manila show {{ dev_share }} -f value -c status"
+  command: "manila show {{ dev_share }}"
   environment:
     OS_PROJECT_NAME: "{{ dev_project }}"
     OS_TENANT_NAME: "{{ dev_project }}"
   register: dev_share_status
   changed_when: false
-  until: dev_share_status.stdout | trim == 'available'
+  until: "'available' in dev_share_status.stdout"
   retries: 30
   delay: 5
 
 - name: Check CephX access rule for developer share
   shell: >-
-    manila access-list {{ dev_share }} --columns access_to -f value |
-    grep -Fx 'techsprint-{{ developer.slug }}'
+    manila access-list {{ dev_share }} --columns access_to |
+    grep -F 'techsprint-{{ developer.slug }}'
   args:
     executable: /bin/bash
   environment:
@@ -203,8 +203,8 @@
 
 - name: Read CephFS export location
   shell: >-
-    manila share-export-location-list {{ dev_share }} -f value -c Path |
-    head -n 1
+    manila share-export-location-list {{ dev_share }} --columns path |
+    grep -Eo '[^|[:space:]]+:/volumes/[^|[:space:]]+' | head -n 1
   args:
     executable: /bin/bash
   environment:
@@ -215,8 +215,8 @@
 
 - name: Read CephX access key
   shell: >-
-    manila access-list {{ dev_share }} --columns access_to,access_key -f value |
-    awk '$1 == "techsprint-{{ developer.slug }}" { print $2; exit }'
+    manila access-list {{ dev_share }} --columns access_to,access_key |
+    grep -F 'techsprint-{{ developer.slug }}' | cut -d '|' -f 3 | xargs
   args:
     executable: /bin/bash
   environment:
@@ -232,6 +232,14 @@
     dev_share_access_name: "techsprint-{{ developer.slug }}"
     dev_share_access_key: "{{ dev_share_key_result.stdout | trim }}"
   no_log: true
+
+- name: Check database instance
+  command: >-
+    openstack --os-project-name {{ dev_project }} server show
+    vm-{{ prefix }}-{{ developer.slug }}-db
+  register: db_server_check
+  changed_when: false
+  failed_when: false
 
 - name: Create database instance
   os_server:
@@ -251,7 +259,17 @@
       role: database
     timeout: 600
   register: db_server
+  when: db_server_check.rc != 0
   no_log: true
+
+- name: Check application instances
+  command: >-
+    openstack --os-project-name {{ dev_project }} server show
+    vm-{{ prefix }}-{{ developer.slug }}-app{{ item }}
+  loop: [1, 2]
+  register: app_server_checks
+  changed_when: false
+  failed_when: false
 
 - name: Create two Moodle application instances
   os_server:
@@ -259,7 +277,7 @@
     state: present
     name: "vm-{{ prefix }}-{{ developer.slug }}-app{{ item }}"
     image: "{{ app_image }}"
-    flavor: "{{ flavor_name }}"
+    flavor: "{{ small_flavor_name if (developer_zero_index == 0 and item == 2) else flavor_name }}"
     nics:
       - port-name: "port-{{ prefix }}-{{ developer.slug }}-app{{ item }}"
     auto_ip: false
@@ -273,6 +291,7 @@
   loop: [1, 2]
   loop_control:
     label: "app{{ item }}"
+  when: app_server_checks.results[item - 1].rc != 0
   no_log: true
 
 - name: Create Cinder data volumes for all developer instances
@@ -298,30 +317,122 @@
     device: /dev/vdb
   loop: [db, app1, app2]
 
-- name: Create internal Octavia load balancer with two members
-  os_loadbalancer:
-    auth: "{{ dev_auth }}"
-    state: present
-    name: "lb-{{ prefix }}-{{ developer.slug }}"
-    vip_subnet: "{{ dev_subnet }}"
-    vip_address: "10.40.{{ developer_zero_index + 1 }}.50"
-    auto_public_ip: false
-    listeners:
-      - name: "listener-{{ prefix }}-{{ developer.slug }}-http"
-        protocol: HTTP
-        protocol_port: 80
-        pool:
-          name: "pool-{{ prefix }}-{{ developer.slug }}-http"
-          protocol: HTTP
-          lb_algorithm: ROUND_ROBIN
-          members:
-            - name: "member-{{ prefix }}-{{ developer.slug }}-app1"
-              address: "{{ dev_app1_ip }}"
-              protocol_port: 80
-              subnet: "{{ dev_subnet }}"
-            - name: "member-{{ prefix }}-{{ developer.slug }}-app2"
-              address: "{{ dev_app2_ip }}"
-              protocol_port: 80
-              subnet: "{{ dev_subnet }}"
-    wait: true
-    timeout: 900
+- name: Check internal OVN load balancer
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer show
+    lb-{{ prefix }}-{{ developer.slug }}
+  register: dev_lb_check
+  changed_when: false
+  failed_when: false
+
+- name: Create internal OVN load balancer
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer create
+    --name lb-{{ prefix }}-{{ developer.slug }}
+    --vip-subnet-id {{ dev_subnet_result.subnet.id }}
+    --vip-address 10.40.{{ developer_zero_index + 1 }}.50
+    --provider ovn
+  when: dev_lb_check.rc != 0
+
+- name: Wait for internal OVN load balancer
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer show
+    lb-{{ prefix }}-{{ developer.slug }}
+    -f value -c provisioning_status
+  register: dev_lb_status
+  changed_when: false
+  until: dev_lb_status.stdout | trim == 'ACTIVE'
+  retries: 60
+  delay: 5
+
+- name: Check TCP listener
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer listener show
+    listener-{{ prefix }}-{{ developer.slug }}-tcp
+  register: dev_listener_check
+  changed_when: false
+  failed_when: false
+
+- name: Create TCP listener
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer listener create
+    --name listener-{{ prefix }}-{{ developer.slug }}-tcp
+    --protocol TCP --protocol-port 80
+    lb-{{ prefix }}-{{ developer.slug }}
+  when: dev_listener_check.rc != 0
+
+- name: Wait for load balancer after listener
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer show
+    lb-{{ prefix }}-{{ developer.slug }}
+    -f value -c provisioning_status
+  register: dev_lb_listener_status
+  changed_when: false
+  until: dev_lb_listener_status.stdout | trim == 'ACTIVE'
+  retries: 60
+  delay: 5
+
+- name: Check TCP pool
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer pool show
+    pool-{{ prefix }}-{{ developer.slug }}-tcp
+  register: dev_pool_check
+  changed_when: false
+  failed_when: false
+
+- name: Create TCP pool
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer pool create
+    --name pool-{{ prefix }}-{{ developer.slug }}-tcp
+    --protocol TCP --lb-algorithm SOURCE_IP_PORT
+    --listener listener-{{ prefix }}-{{ developer.slug }}-tcp
+  when: dev_pool_check.rc != 0
+
+- name: Wait for load balancer after pool
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer show
+    lb-{{ prefix }}-{{ developer.slug }}
+    -f value -c provisioning_status
+  register: dev_lb_pool_status
+  changed_when: false
+  until: dev_lb_pool_status.stdout | trim == 'ACTIVE'
+  retries: 60
+  delay: 5
+
+- name: Check TCP pool members
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer member show
+    pool-{{ prefix }}-{{ developer.slug }}-tcp
+    member-{{ prefix }}-{{ developer.slug }}-app{{ item }}
+  loop: [1, 2]
+  register: dev_member_checks
+  changed_when: false
+  failed_when: false
+
+- name: Create two TCP pool members
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer member create
+    --name member-{{ prefix }}-{{ developer.slug }}-app{{ item }}
+    --address 10.40.{{ developer_zero_index + 1 }}.3{{ item }}
+    --protocol-port 80
+    --subnet-id {{ dev_subnet_result.subnet.id }}
+    pool-{{ prefix }}-{{ developer.slug }}-tcp
+  loop: [1, 2]
+  loop_control:
+    label: "app{{ item }}"
+  when: dev_member_checks.results[item - 1].rc != 0
+  register: dev_member_create
+  until: dev_member_create is succeeded
+  retries: 60
+  delay: 5
+
+- name: Wait for completed OVN load balancer configuration
+  command: >-
+    openstack --os-project-name {{ dev_project }} loadbalancer show
+    lb-{{ prefix }}-{{ developer.slug }}
+    -f value -c provisioning_status
+  register: dev_lb_complete_status
+  changed_when: false
+  until: dev_lb_complete_status.stdout | trim == 'ACTIVE'
+  retries: 60
+  delay: 5

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 
@@ -9,8 +11,17 @@ parser.add_argument("--prefix", required=True)
 parser.add_argument("--developers", required=True)
 args = parser.parse_args()
 
-def run(command):
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def run(command, environment=None):
+    process_environment = os.environ.copy()
+    if environment:
+        process_environment.update(environment)
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        env=process_environment,
+    )
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 failures = []
@@ -25,12 +36,21 @@ for slug in [x for x in args.developers.split(",") if x]:
     if rc:
         failures.append("{}: server list failed: {}".format(slug, error))
         continue
-    names = {item.get("Name") for item in json.loads(output or "[]")}
+    servers = json.loads(output or "[]")
+    names = {item.get("Name") for item in servers}
     missing = [name for name in expected if name not in names]
     if missing:
         failures.append("{}: missing {}".format(slug, ", ".join(missing)))
     else:
         print("[PASS] {}: DB + 2 app VM instances".format(slug))
+
+    server_by_name = {item.get("Name"): item for item in servers}
+    not_active = [
+        name for name in expected
+        if name in server_by_name and server_by_name[name].get("Status") != "ACTIVE"
+    ]
+    if not_active:
+        failures.append("{}: non-ACTIVE instances: {}".format(slug, ", ".join(not_active)))
 
     rc, output, error = run(["openstack", "--os-project-name", project, "loadbalancer", "show", "lb-{}-{}".format(args.prefix, slug), "-f", "value", "-c", "provisioning_status"])
     if rc or output != "ACTIVE":
@@ -44,11 +64,24 @@ for slug in [x for x in args.developers.split(",") if x]:
     else:
         print("[PASS] {}: private Swift container".format(slug))
 
-rc, output, error = run(["openstack", "--os-project-name", "prj-{}-lead".format(args.prefix), "server", "show", "vm-{}-lead-jump".format(args.prefix)])
-if rc:
-    failures.append("Team Lead jump host missing")
+    rc, output, error = run(
+        ["manila", "show", "share-{}-{}-backup".format(args.prefix, slug)],
+        {"OS_PROJECT_NAME": project, "OS_TENANT_NAME": project},
+    )
+    if rc or not re.search(r"\|\s*status\s*\|\s*available\s*\|", output, re.IGNORECASE):
+        failures.append("{}: Manila share is not available ({})".format(slug, error or output))
+    else:
+        print("[PASS] {}: Manila CephFS share available".format(slug))
+
+rc, output, error = run([
+    "openstack", "--os-project-name", "prj-{}-lead".format(args.prefix),
+    "server", "show", "vm-{}-lead-jump".format(args.prefix),
+    "-f", "value", "-c", "status",
+])
+if rc or output != "ACTIVE":
+    failures.append("Team Lead jump host is not ACTIVE ({})".format(error or output))
 else:
-    print("[PASS] Team Lead jump host exists")
+    print("[PASS] Team Lead jump host ACTIVE")
 
 if failures:
     for failure in failures:
@@ -56,4 +89,3 @@ if failures:
     sys.exit(1)
 
 print("[PASS] TECHSPRINT_OPENSTACK_DEPLOYMENT")
-

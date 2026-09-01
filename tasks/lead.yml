@@ -78,13 +78,46 @@
     security_groups:
       - "sg-{{ prefix }}-lead-jump"
 
+- name: Check Team Lead SSH keypair
+  command: >-
+    openstack --os-project-name {{ lead_project }} keypair show
+    key-{{ prefix }}-lead
+  register: lead_keypair_check
+  changed_when: false
+  failed_when: false
+
+- name: Create Team Lead SSH keypair
+  command: >-
+    openstack --os-project-name {{ lead_project }} keypair create
+    --public-key {{ runtime_dir }}/lead_ssh.pub
+    key-{{ prefix }}-lead
+  when: lead_keypair_check.rc != 0
+
+- name: Check Team Lead jump-host instance
+  command: >-
+    openstack --os-project-name {{ lead_project }} server show
+    vm-{{ prefix }}-lead-jump -f value -c status
+  register: lead_server_check
+  changed_when: false
+  failed_when: false
+
+- name: Stop when an existing Team Lead instance is unhealthy
+  fail:
+    msg: >-
+      Team Lead instanca postoji, ali status je
+      {{ lead_server_check.stdout | trim }}. Pregledaj Nova fault prije ponovnog stvaranja.
+  when:
+    - lead_server_check.rc == 0
+    - (lead_server_check.stdout | trim) not in ['ACTIVE', 'SHUTOFF']
+
 - name: Create Team Lead jump-host instance
   os_server:
     auth: "{{ lead_auth }}"
     state: present
     name: "vm-{{ prefix }}-lead-jump"
     image: "{{ lead_image }}"
-    flavor: "{{ flavor_name }}"
+    flavor: "{{ small_flavor_name }}"
+    key_name: "key-{{ prefix }}-lead"
     nics:
       - port-name: "port-{{ prefix }}-lead"
     auto_ip: false
@@ -94,6 +127,7 @@
       environment: "{{ environment_name }}"
       role: team-lead-jump
     timeout: 600
+  when: lead_server_check.rc != 0
   no_log: true
 
 - name: Create one management port from Team Lead to each developer network
