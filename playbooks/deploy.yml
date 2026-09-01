@@ -1,0 +1,99 @@
+---
+- name: TechSprint OpenStack deployment
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    admin_project: "{{ lookup('env', 'OS_PROJECT_NAME') | default('admin', true) }}"
+    admin_auth:
+      auth_url: "{{ lookup('env', 'OS_AUTH_URL') }}"
+      username: "{{ lookup('env', 'OS_USERNAME') }}"
+      password: "{{ lookup('env', 'OS_PASSWORD') }}"
+      project_name: "{{ admin_project }}"
+      user_domain_name: "{{ lookup('env', 'OS_USER_DOMAIN_NAME') | default('Default', true) }}"
+      project_domain_name: "{{ lookup('env', 'OS_PROJECT_DOMAIN_NAME') | default('Default', true) }}"
+    common_metadata:
+      project: techsprint
+      environment: "{{ environment_name }}"
+
+  pre_tasks:
+    - name: Validate required OpenStack environment
+      assert:
+        that:
+          - lookup('env', 'OS_AUTH_URL') | length > 0
+          - lookup('env', 'OS_USERNAME') | length > 0
+          - lookup('env', 'OS_PASSWORD') | length > 0
+          - developers | length > 0
+          - lead.role == 'devops_lead'
+        fail_msg: "Nedostaje overcloud autentikacija ili ispravan CSV."
+      tags: [always]
+
+    - name: Verify OpenStack authentication
+      command: openstack token issue -f value -c id
+      changed_when: false
+      no_log: true
+      tags: [always]
+
+  tasks:
+    - name: Create required 2 vCPU and 4 GB flavor
+      os_nova_flavor:
+        auth: "{{ admin_auth }}"
+        state: present
+        name: "{{ flavor_name }}"
+        ram: 4096
+        vcpus: 2
+        disk: 10
+        ephemeral: 0
+        is_public: true
+      tags: [global]
+
+    - name: Check Manila share type
+      command: "manila type-show {{ share_type }}"
+      register: share_type_check
+      changed_when: false
+      failed_when: false
+      tags: [global, storage]
+
+    - name: Create Manila CephFS share type
+      command: "manila type-create {{ share_type }} false"
+      when: share_type_check.rc != 0
+      tags: [global, storage]
+
+    - name: Bind Manila share type to CephFS backend
+      command: "manila type-key {{ share_type }} set share_backend_name={{ share_backend }}"
+      changed_when: false
+      tags: [global, storage]
+
+    - name: Create IAM, projects and role assignments
+      include_tasks: ../tasks/identity.yml
+      tags: [identity]
+
+    - name: Create resources for each developer
+      include_tasks: ../tasks/developer.yml
+      loop: "{{ developers }}"
+      loop_control:
+        loop_var: developer
+        index_var: developer_zero_index
+        label: "{{ developer.slug }}"
+      tags: [developer, network, storage, compute, loadbalancer]
+
+    - name: Create central Team Lead and jump-host resources
+      include_tasks: ../tasks/lead.yml
+      tags: [lead, network, compute]
+
+  post_tasks:
+    - name: Run deployment verification
+      command: >-
+        python3 {{ playbook_dir }}/../tools/verify.py
+        --prefix {{ prefix }}
+        --developers {{ developers | map(attribute='slug') | join(',') }}
+      register: verification
+      changed_when: false
+      tags: [verify]
+
+    - name: Display verification report
+      debug:
+        var: verification.stdout_lines
+      tags: [verify]
+

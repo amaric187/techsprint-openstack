@@ -1,0 +1,93 @@
+#cloud-config
+users:
+  - default
+  - name: techsprint
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - {{ lead_public_key }}
+write_files:
+  - path: /etc/techsprint/swift.env
+    permissions: '0600'
+    content: |
+      OS_AUTH_URL={{ lookup('env', 'OS_AUTH_URL') }}
+      OS_AUTH_VERSION=3
+      OS_USERNAME={{ developer.storage_username }}
+      OS_PASSWORD={{ developer.storage_password }}
+      OS_PROJECT_NAME={{ dev_project }}
+      OS_USER_DOMAIN_NAME=Default
+      OS_PROJECT_DOMAIN_NAME=Default
+      SWIFT_CONTAINER={{ dev_container }}
+  - path: /etc/rclone.conf
+    permissions: '0600'
+    content: |
+      [swift]
+      type = swift
+      env_auth = true
+  - path: /etc/ceph/techsprint.secret
+    permissions: '0600'
+    content: "{{ dev_share_access_key }}\n"
+  - path: /etc/systemd/system/techsprint-swift.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=TechSprint Swift object-storage mount
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=simple
+      EnvironmentFile=/etc/techsprint/swift.env
+      ExecStart=/usr/local/bin/rclone mount swift:${SWIFT_CONTAINER} /mnt/moodle-object --config /etc/rclone.conf --allow-other --vfs-cache-mode writes
+      ExecStop=/bin/fusermount3 -uz /mnt/moodle-object
+      Restart=on-failure
+      RestartSec=10
+      [Install]
+      WantedBy=multi-user.target
+  - path: /var/www/html/health.html
+    permissions: '0644'
+    content: "healthy {{ developer.slug }} app{{ item }}\n"
+  - path: /usr/local/sbin/techsprint-app-bootstrap.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      DEV=""
+      for _ in $(seq 1 60); do
+        DEV="$(lsblk -dpno NAME,TYPE | awk '$2 == "disk" && $1 != "/dev/vda" {print $1; exit}')"
+        [[ -n "$DEV" ]] && break
+        sleep 2
+      done
+      if [[ -n "$DEV" ]]; then
+        blkid "$DEV" >/dev/null 2>&1 || mkfs.xfs -f "$DEV"
+        mkdir -p /srv/moodle
+        grep -q '/srv/moodle' /etc/fstab || echo "$DEV /srv/moodle xfs defaults,nofail 0 2" >> /etc/fstab
+        mount /srv/moodle || true
+      fi
+      dnf -y install httpd curl tar unzip php php-cli php-mysqlnd php-gd php-xml php-mbstring fuse3 ceph-common || true
+      mkdir -p /mnt/moodle-object /mnt/moodle-backup
+      grep -q '/mnt/moodle-backup' /etc/fstab || echo '{{ dev_share_export }} /mnt/moodle-backup ceph name={{ dev_share_access_name }},secretfile=/etc/ceph/techsprint.secret,_netdev,nofail 0 0' >> /etc/fstab
+      mount /mnt/moodle-backup || true
+      if [[ ! -x /usr/local/bin/rclone ]]; then
+        curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip || true
+        if [[ -s /tmp/rclone.zip ]]; then
+          unzip -qo /tmp/rclone.zip -d /tmp/rclone
+          install -m 0755 /tmp/rclone/rclone-*/rclone /usr/local/bin/rclone
+        fi
+      fi
+      if [[ -x /usr/local/bin/rclone ]]; then
+        grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other >> /etc/fuse.conf
+        systemctl daemon-reload
+        systemctl enable --now techsprint-swift.service
+      fi
+      systemctl enable --now httpd
+      if [[ ! -d /srv/moodle/moodle ]]; then
+        curl -fsSL https://download.moodle.org/download.php/direct/stable310/moodle-latest-310.tgz -o /tmp/moodle.tgz || true
+        [[ -s /tmp/moodle.tgz ]] && tar -xzf /tmp/moodle.tgz -C /srv/moodle || true
+      fi
+      ln -sfn /srv/moodle/moodle /var/www/html/moodle
+      chown -R apache:apache /srv/moodle /var/www/html
+      restorecon -RF /srv/moodle /var/www/html 2>/dev/null || true
+runcmd:
+  - [bash, /usr/local/sbin/techsprint-app-bootstrap.sh]
+final_message: "TECHSPRINT_APP_READY {{ developer.slug }} app{{ item }}"

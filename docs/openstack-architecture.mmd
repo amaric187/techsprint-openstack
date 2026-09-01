@@ -1,0 +1,27 @@
+flowchart TB
+  Internet["Internet"] --> FIP["Jedini floating IP"]
+  FIP --> Lead["Team Lead / Jump VM"]
+
+  subgraph D1["Projekt developera 1"]
+    LB1["Interni Octavia LB"] --> A11["Moodle app1"]
+    LB1 --> A12["Moodle app2"]
+    A11 --> DB1["MariaDB"]
+    A12 --> DB1
+    A11 --> S1["Swift + Manila"]
+    A12 --> S1
+  end
+
+  subgraph D2["Projekt developera 2"]
+    LB2["Interni Octavia LB"] --> A21["Moodle app1"]
+    LB2 --> A22["Moodle app2"]
+    A21 --> DB2["MariaDB"]
+    A22 --> DB2
+    A21 --> S2["Swift + Manila"]
+    A22 --> S2
+  end
+
+  Lead --> LB1
+  Lead --> LB2
+  Lead -. "SSH" .-> A11
+  Lead -. "SSH" .-> A21
+

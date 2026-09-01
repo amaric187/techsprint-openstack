@@ -1,0 +1,51 @@
+#cloud-config
+users:
+  - default
+  - name: techsprint
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - {{ lead_public_key }}
+write_files:
+  - path: /home/techsprint/.ssh/id_rsa
+    owner: techsprint:techsprint
+    permissions: '0600'
+    content: |
+{{ lookup('file', runtime_dir + '/lead_ssh') | indent(6, true) }}
+  - path: /home/techsprint/.ssh/id_rsa.pub
+    owner: techsprint:techsprint
+    permissions: '0644'
+    content: "{{ lead_public_key }}\n"
+  - path: /home/techsprint/power-all.sh
+    owner: techsprint:techsprint
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /home/techsprint/lead-openrc
+      ACTION="${1:-list}"
+      case "$ACTION" in list|start|stop|reboot) ;; *) echo "Upotreba: $0 list|start|stop|reboot"; exit 2;; esac
+      {% for dev in developers %}
+      echo "=== {{ dev.slug }} ==="
+      export OS_PROJECT_NAME="prj-{{ prefix }}-{{ dev.slug }}"
+      if [[ "$ACTION" == list ]]; then
+        openstack server list
+      else
+        for id in $(openstack server list -f value -c ID); do openstack server "$ACTION" "$id"; done
+      fi
+      {% endfor %}
+  - path: /home/techsprint/lead-openrc
+    owner: techsprint:techsprint
+    permissions: '0600'
+    content: |
+      export OS_AUTH_URL='{{ lookup('env', 'OS_AUTH_URL') }}'
+      export OS_IDENTITY_API_VERSION=3
+      export OS_USERNAME='{{ lead.username }}'
+      export OS_PASSWORD='{{ lead.password }}'
+      export OS_USER_DOMAIN_NAME='Default'
+      export OS_PROJECT_DOMAIN_NAME='Default'
+      export OS_PROJECT_NAME='prj-{{ prefix }}-lead'
+runcmd:
+  - [bash, -lc, "dnf -y install python3-openstackclient || true"]
+final_message: "TECHSPRINT_LEAD_READY"

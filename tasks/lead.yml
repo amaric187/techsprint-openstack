@@ -1,0 +1,151 @@
+---
+- name: Set central Team Lead variables
+  set_fact:
+    lead_project: "prj-{{ prefix }}-lead"
+    lead_network: "net-{{ prefix }}-lead"
+    lead_subnet: "subnet-{{ prefix }}-lead"
+    lead_router: "rtr-{{ prefix }}-lead"
+    lead_ip: 10.40.250.10
+    lead_auth:
+      auth_url: "{{ lookup('env', 'OS_AUTH_URL') }}"
+      username: "{{ lookup('env', 'OS_USERNAME') }}"
+      password: "{{ lookup('env', 'OS_PASSWORD') }}"
+      project_name: "prj-{{ prefix }}-lead"
+      user_domain_name: "{{ lookup('env', 'OS_USER_DOMAIN_NAME') | default('Default', true) }}"
+      project_domain_name: "{{ lookup('env', 'OS_PROJECT_DOMAIN_NAME') | default('Default', true) }}"
+
+- name: Create central Team Lead network
+  os_network:
+    auth: "{{ lead_auth }}"
+    state: present
+    name: "{{ lead_network }}"
+    project: "{{ lead_project }}"
+    shared: false
+    external: false
+  register: lead_network_result
+
+- name: Create central Team Lead subnet
+  os_subnet:
+    auth: "{{ lead_auth }}"
+    state: present
+    name: "{{ lead_subnet }}"
+    network_name: "{{ lead_network }}"
+    project: "{{ lead_project }}"
+    cidr: 10.40.250.0/24
+    gateway_ip: 10.40.250.1
+    enable_dhcp: true
+    dns_nameservers: [1.1.1.1, 8.8.8.8]
+
+- name: Create Team Lead router
+  os_router:
+    auth: "{{ lead_auth }}"
+    state: present
+    name: "{{ lead_router }}"
+    project: "{{ lead_project }}"
+    network: "{{ external_network }}"
+    interfaces:
+      - "{{ lead_subnet }}"
+
+- name: Create jump-host security group
+  os_security_group:
+    auth: "{{ lead_auth }}"
+    state: present
+    name: "sg-{{ prefix }}-lead-jump"
+    description: "Only publicly reachable TechSprint host"
+    project: "{{ lead_project }}"
+  register: lead_sg
+
+- name: Allow public SSH only to jump host
+  os_security_group_rule:
+    auth: "{{ lead_auth }}"
+    state: present
+    security_group: "sg-{{ prefix }}-lead-jump"
+    protocol: tcp
+    port_range_min: 22
+    port_range_max: 22
+    remote_ip_prefix: 0.0.0.0/0
+    direction: ingress
+    ethertype: IPv4
+
+- name: Create central jump-host port
+  os_port:
+    auth: "{{ lead_auth }}"
+    state: present
+    name: "port-{{ prefix }}-lead"
+    network: "{{ lead_network_result.network.id }}"
+    fixed_ips:
+      - ip_address: "{{ lead_ip }}"
+    security_groups:
+      - "sg-{{ prefix }}-lead-jump"
+
+- name: Create Team Lead jump-host instance
+  os_server:
+    auth: "{{ lead_auth }}"
+    state: present
+    name: "vm-{{ prefix }}-lead-jump"
+    image: "{{ lead_image }}"
+    flavor: "{{ flavor_name }}"
+    nics:
+      - port-name: "port-{{ prefix }}-lead"
+    auto_ip: false
+    userdata: "{{ lookup('template', '../templates/cloud-init-lead.yml.j2') }}"
+    meta:
+      project: techsprint
+      environment: "{{ environment_name }}"
+      role: team-lead-jump
+    timeout: 600
+  no_log: true
+
+- name: Create one management port from Team Lead to each developer network
+  os_port:
+    auth: "{{ lead_auth }}"
+    state: present
+    name: "port-{{ prefix }}-lead-to-{{ item.slug }}"
+    network: "net-{{ prefix }}-{{ item.slug }}"
+    fixed_ips:
+      - ip_address: "10.40.{{ developer_index + 1 }}.10"
+    security_groups:
+      - "sg-{{ prefix }}-lead-jump"
+  loop: "{{ developers }}"
+  loop_control:
+    index_var: developer_index
+    label: "{{ item.slug }}"
+  register: lead_dev_ports
+
+- name: Attach developer management ports to Team Lead instance
+  command: >-
+    openstack --os-project-name {{ lead_project }} server add port
+    vm-{{ prefix }}-lead-jump {{ item.id }}
+  loop: "{{ lead_dev_ports.results }}"
+  loop_control:
+    label: "{{ item.item.slug }}"
+  register: lead_port_attach
+  failed_when: >-
+    lead_port_attach.rc != 0 and
+    'already attached' not in (lead_port_attach.stderr | lower)
+  changed_when: lead_port_attach.rc == 0
+
+- name: Assign the only project floating IP to Team Lead jump host
+  os_floating_ip:
+    auth: "{{ lead_auth }}"
+    state: present
+    server: "vm-{{ prefix }}-lead-jump"
+    network: "{{ external_network }}"
+    nat_destination: "{{ lead_network }}"
+    reuse: true
+    wait: true
+    timeout: 180
+  register: lead_fip
+
+- name: Read jump-host addresses
+  command: >-
+    openstack --os-project-name {{ lead_project }} server show
+    vm-{{ prefix }}-lead-jump -f value -c addresses
+  register: lead_addresses
+  changed_when: false
+
+- name: Save jump-host addresses
+  copy:
+    dest: "{{ runtime_dir }}/jump-host.txt"
+    mode: '0600'
+    content: "{{ lead_addresses.stdout }}\n"

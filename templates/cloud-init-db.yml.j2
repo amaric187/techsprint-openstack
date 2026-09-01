@@ -1,0 +1,43 @@
+#cloud-config
+users:
+  - default
+  - name: techsprint
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - {{ lead_public_key }}
+write_files:
+  - path: /root/techsprint-db.env
+    permissions: '0600'
+    content: |
+      MOODLE_DB=moodle
+      MOODLE_USER=moodle
+      MOODLE_PASSWORD={{ developer.database_password }}
+  - path: /usr/local/sbin/techsprint-db-bootstrap.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      DEV=""
+      for _ in $(seq 1 60); do
+        DEV="$(lsblk -dpno NAME,TYPE | awk '$2 == "disk" && $1 != "/dev/vda" {print $1; exit}')"
+        [[ -n "$DEV" ]] && break
+        sleep 2
+      done
+      if [[ -n "$DEV" ]]; then
+        blkid "$DEV" >/dev/null 2>&1 || mkfs.xfs -f "$DEV"
+        mkdir -p /srv/mysql
+        grep -q '/srv/mysql' /etc/fstab || echo "$DEV /srv/mysql xfs defaults,nofail 0 2" >> /etc/fstab
+        mount /srv/mysql || true
+      fi
+      dnf -y install mariadb-server || true
+      systemctl enable --now mariadb
+      mysql -e "CREATE DATABASE IF NOT EXISTS moodle DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+      mysql -e "CREATE USER IF NOT EXISTS 'moodle'@'%' IDENTIFIED BY '{{ developer.database_password }}';"
+      mysql -e "GRANT ALL PRIVILEGES ON moodle.* TO 'moodle'@'%'; FLUSH PRIVILEGES;"
+      sed -ri 's/^[# ]*bind-address.*/bind-address=0.0.0.0/' /etc/my.cnf.d/mariadb-server.cnf 2>/dev/null || true
+      systemctl restart mariadb
+runcmd:
+  - [bash, /usr/local/sbin/techsprint-db-bootstrap.sh]
+final_message: "TECHSPRINT_DB_READY"

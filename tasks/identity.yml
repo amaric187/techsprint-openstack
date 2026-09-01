@@ -1,0 +1,150 @@
+---
+- name: Create central Team Lead project
+  os_project:
+    auth: "{{ admin_auth }}"
+    state: present
+    name: "prj-{{ prefix }}-lead"
+    description: "TechSprint testing Team Lead and jump-host project"
+    domain_id: default
+    enabled: true
+  register: lead_project_result
+
+- name: Create developer projects
+  os_project:
+    auth: "{{ admin_auth }}"
+    state: present
+    name: "prj-{{ prefix }}-{{ item.slug }}"
+    description: "TechSprint testing isolated project for {{ item.display_name }}"
+    domain_id: Default
+    enabled: true
+  loop: "{{ developers }}"
+  loop_control:
+    label: "{{ item.slug }}"
+
+- name: Create OpenStack users
+  os_user:
+    auth: "{{ admin_auth }}"
+    state: present
+    name: "{{ item.username }}"
+    password: "{{ item.password }}"
+    update_password: on_create
+    email: "{{ item.email }}"
+    domain: Default
+    default_project: "{{ 'prj-' + prefix + '-lead' if item.role == 'devops_lead' else 'prj-' + prefix + '-' + item.slug }}"
+    enabled: true
+  loop: "{{ all_users }}"
+  loop_control:
+    label: "{{ item.username }}"
+  no_log: true
+
+- name: Create developer storage service users
+  os_user:
+    auth: "{{ admin_auth }}"
+    state: present
+    name: "{{ item.storage_username }}"
+    password: "{{ item.storage_password }}"
+    update_password: on_create
+    email: "storage-{{ item.slug }}@example.invalid"
+    domain: Default
+    default_project: "prj-{{ prefix }}-{{ item.slug }}"
+    enabled: true
+  loop: "{{ developers }}"
+  loop_control:
+    label: "{{ item.storage_username }}"
+  no_log: true
+
+- name: Create Team Lead group
+  os_group:
+    auth: "{{ admin_auth }}"
+    state: present
+    name: "grp-{{ prefix }}-leads"
+    description: "Team Leads with project-scoped VM power access"
+    domain: Default
+
+- name: Add Team Lead user to Team Lead group
+  os_user_group:
+    auth: "{{ admin_auth }}"
+    state: present
+    user: "{{ lead.username }}"
+    group: "grp-{{ prefix }}-leads"
+
+- name: Assign Team Lead group to central project
+  os_user_role:
+    auth: "{{ admin_auth }}"
+    state: present
+    group: "grp-{{ prefix }}-leads"
+    role: member
+    project: "prj-{{ prefix }}-lead"
+
+- name: Create developer groups
+  os_group:
+    auth: "{{ admin_auth }}"
+    state: present
+    name: "grp-{{ prefix }}-{{ item.slug }}"
+    description: "Developer group for {{ item.display_name }}"
+    domain: Default
+  loop: "{{ developers }}"
+  loop_control:
+    label: "{{ item.slug }}"
+
+- name: Add each developer to own group
+  os_user_group:
+    auth: "{{ admin_auth }}"
+    state: present
+    user: "{{ item.username }}"
+    group: "grp-{{ prefix }}-{{ item.slug }}"
+  loop: "{{ developers }}"
+  loop_control:
+    label: "{{ item.slug }}"
+
+- name: Assign developer groups only to their own projects
+  os_user_role:
+    auth: "{{ admin_auth }}"
+    state: present
+    group: "grp-{{ prefix }}-{{ item.slug }}"
+    role: member
+    project: "prj-{{ prefix }}-{{ item.slug }}"
+  loop: "{{ developers }}"
+  loop_control:
+    label: "{{ item.slug }}"
+
+- name: Assign Team Lead group across developer projects
+  os_user_role:
+    auth: "{{ admin_auth }}"
+    state: present
+    group: "grp-{{ prefix }}-leads"
+    role: member
+    project: "prj-{{ prefix }}-{{ item.slug }}"
+  loop: "{{ developers }}"
+  loop_control:
+    label: "{{ item.slug }}"
+
+- name: Grant admin user deployment access to project scopes
+  os_user_role:
+    auth: "{{ admin_auth }}"
+    state: present
+    user: "{{ lookup('env', 'OS_USERNAME') }}"
+    role: admin
+    project: "prj-{{ prefix }}-{{ item.slug }}"
+  loop: "{{ developers }}"
+  loop_control:
+    label: "{{ item.slug }}"
+
+- name: Grant admin user deployment access to central project
+  os_user_role:
+    auth: "{{ admin_auth }}"
+    state: present
+    user: "{{ lookup('env', 'OS_USERNAME') }}"
+    role: admin
+    project: "prj-{{ prefix }}-lead"
+
+- name: Grant least-privilege Swift role to storage service users
+  os_user_role:
+    auth: "{{ admin_auth }}"
+    state: present
+    user: "{{ item.storage_username }}"
+    role: swiftoperator
+    project: "prj-{{ prefix }}-{{ item.slug }}"
+  loop: "{{ developers }}"
+  loop_control:
+    label: "{{ item.slug }}"

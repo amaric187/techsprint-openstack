@@ -1,0 +1,327 @@
+---
+- name: Set developer resource variables
+  set_fact:
+    dev_number: "{{ developer_zero_index + 1 }}"
+    dev_project: "prj-{{ prefix }}-{{ developer.slug }}"
+    dev_network: "net-{{ prefix }}-{{ developer.slug }}"
+    dev_subnet: "subnet-{{ prefix }}-{{ developer.slug }}"
+    dev_router: "rtr-{{ prefix }}-{{ developer.slug }}"
+    dev_cidr: "10.40.{{ developer_zero_index + 1 }}.0/24"
+    dev_gateway: "10.40.{{ developer_zero_index + 1 }}.1"
+    dev_lead_ip: "10.40.{{ developer_zero_index + 1 }}.10"
+    dev_db_ip: "10.40.{{ developer_zero_index + 1 }}.20"
+    dev_app1_ip: "10.40.{{ developer_zero_index + 1 }}.31"
+    dev_app2_ip: "10.40.{{ developer_zero_index + 1 }}.32"
+    dev_container: "obj-{{ prefix }}-{{ developer.slug }}-moodle"
+    dev_share: "share-{{ prefix }}-{{ developer.slug }}-backup"
+
+- name: Build project-scoped admin authentication
+  set_fact:
+    dev_auth:
+      auth_url: "{{ lookup('env', 'OS_AUTH_URL') }}"
+      username: "{{ lookup('env', 'OS_USERNAME') }}"
+      password: "{{ lookup('env', 'OS_PASSWORD') }}"
+      project_name: "{{ dev_project }}"
+      user_domain_name: "{{ lookup('env', 'OS_USER_DOMAIN_NAME') | default('Default', true) }}"
+      project_domain_name: "{{ lookup('env', 'OS_PROJECT_DOMAIN_NAME') | default('Default', true) }}"
+
+- name: Create isolated developer network
+  os_network:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "{{ dev_network }}"
+    project: "{{ dev_project }}"
+    shared: false
+    external: false
+    port_security_enabled: true
+  register: dev_network_result
+
+- name: Create developer subnet
+  os_subnet:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "{{ dev_subnet }}"
+    network_name: "{{ dev_network }}"
+    project: "{{ dev_project }}"
+    cidr: "{{ dev_cidr }}"
+    gateway_ip: "{{ dev_gateway }}"
+    enable_dhcp: true
+    dns_nameservers:
+      - 1.1.1.1
+      - 8.8.8.8
+  register: dev_subnet_result
+
+- name: Create router and enable package-install egress
+  os_router:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "{{ dev_router }}"
+    project: "{{ dev_project }}"
+    network: "{{ external_network }}"
+    interfaces:
+      - "{{ dev_subnet }}"
+
+- name: Create application security group
+  os_security_group:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "sg-{{ prefix }}-{{ developer.slug }}-app"
+    description: "HTTP from LB subnet and SSH only from Team Lead jump host"
+    project: "{{ dev_project }}"
+  register: app_sg
+
+- name: Allow HTTP to application instances from own subnet
+  os_security_group_rule:
+    auth: "{{ dev_auth }}"
+    state: present
+    security_group: "sg-{{ prefix }}-{{ developer.slug }}-app"
+    protocol: tcp
+    port_range_min: 80
+    port_range_max: 80
+    remote_ip_prefix: "{{ dev_cidr }}"
+    direction: ingress
+    ethertype: IPv4
+
+- name: Allow SSH to applications only from Team Lead port
+  os_security_group_rule:
+    auth: "{{ dev_auth }}"
+    state: present
+    security_group: "sg-{{ prefix }}-{{ developer.slug }}-app"
+    protocol: tcp
+    port_range_min: 22
+    port_range_max: 22
+    remote_ip_prefix: "{{ dev_lead_ip }}/32"
+    direction: ingress
+    ethertype: IPv4
+
+- name: Create database security group
+  os_security_group:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "sg-{{ prefix }}-{{ developer.slug }}-db"
+    description: "MariaDB from own subnet and SSH from Team Lead"
+    project: "{{ dev_project }}"
+  register: db_sg
+
+- name: Allow MariaDB only from own subnet
+  os_security_group_rule:
+    auth: "{{ dev_auth }}"
+    state: present
+    security_group: "sg-{{ prefix }}-{{ developer.slug }}-db"
+    protocol: tcp
+    port_range_min: 3306
+    port_range_max: 3306
+    remote_ip_prefix: "{{ dev_cidr }}"
+    direction: ingress
+    ethertype: IPv4
+
+- name: Allow SSH to database only from Team Lead port
+  os_security_group_rule:
+    auth: "{{ dev_auth }}"
+    state: present
+    security_group: "sg-{{ prefix }}-{{ developer.slug }}-db"
+    protocol: tcp
+    port_range_min: 22
+    port_range_max: 22
+    remote_ip_prefix: "{{ dev_lead_ip }}/32"
+    direction: ingress
+    ethertype: IPv4
+
+- name: Create fixed application and database ports
+  os_port:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "port-{{ prefix }}-{{ developer.slug }}-{{ item.name }}"
+    network: "{{ dev_network_result.network.id }}"
+    fixed_ips:
+      - ip_address: "{{ item.address }}"
+    security_groups:
+      - "{{ item.security_group }}"
+  loop:
+    - { name: db, address: "{{ dev_db_ip }}", security_group: "sg-{{ prefix }}-{{ developer.slug }}-db" }
+    - { name: app1, address: "{{ dev_app1_ip }}", security_group: "sg-{{ prefix }}-{{ developer.slug }}-app" }
+    - { name: app2, address: "{{ dev_app2_ip }}", security_group: "sg-{{ prefix }}-{{ developer.slug }}-app" }
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create private Swift container for Moodle files
+  os_object:
+    auth: "{{ dev_auth }}"
+    state: present
+    container: "{{ dev_container }}"
+    container_access: private
+
+- name: Check developer Manila share
+  command: "manila show {{ dev_share }}"
+  environment:
+    OS_PROJECT_NAME: "{{ dev_project }}"
+    OS_TENANT_NAME: "{{ dev_project }}"
+  register: dev_share_check
+  changed_when: false
+  failed_when: false
+
+- name: Create developer CephFS backup share
+  command: >-
+    manila create CEPHFS 10 --name {{ dev_share }}
+    --share-type {{ share_type }}
+  environment:
+    OS_PROJECT_NAME: "{{ dev_project }}"
+    OS_TENANT_NAME: "{{ dev_project }}"
+  when: dev_share_check.rc != 0
+
+- name: Wait for developer CephFS share
+  command: "manila show {{ dev_share }} -f value -c status"
+  environment:
+    OS_PROJECT_NAME: "{{ dev_project }}"
+    OS_TENANT_NAME: "{{ dev_project }}"
+  register: dev_share_status
+  changed_when: false
+  until: dev_share_status.stdout | trim == 'available'
+  retries: 30
+  delay: 5
+
+- name: Check CephX access rule for developer share
+  shell: >-
+    manila access-list {{ dev_share }} --columns access_to -f value |
+    grep -Fx 'techsprint-{{ developer.slug }}'
+  args:
+    executable: /bin/bash
+  environment:
+    OS_PROJECT_NAME: "{{ dev_project }}"
+    OS_TENANT_NAME: "{{ dev_project }}"
+  register: dev_share_access_check
+  changed_when: false
+  failed_when: false
+
+- name: Grant least-privilege CephX access to developer share
+  command: >-
+    manila access-allow {{ dev_share }} cephx techsprint-{{ developer.slug }}
+  environment:
+    OS_PROJECT_NAME: "{{ dev_project }}"
+    OS_TENANT_NAME: "{{ dev_project }}"
+  when: dev_share_access_check.rc != 0
+
+- name: Read CephFS export location
+  shell: >-
+    manila share-export-location-list {{ dev_share }} -f value -c Path |
+    head -n 1
+  args:
+    executable: /bin/bash
+  environment:
+    OS_PROJECT_NAME: "{{ dev_project }}"
+    OS_TENANT_NAME: "{{ dev_project }}"
+  register: dev_share_export_result
+  changed_when: false
+
+- name: Read CephX access key
+  shell: >-
+    manila access-list {{ dev_share }} --columns access_to,access_key -f value |
+    awk '$1 == "techsprint-{{ developer.slug }}" { print $2; exit }'
+  args:
+    executable: /bin/bash
+  environment:
+    OS_PROJECT_NAME: "{{ dev_project }}"
+    OS_TENANT_NAME: "{{ dev_project }}"
+  register: dev_share_key_result
+  changed_when: false
+  no_log: true
+
+- name: Store CephFS mount values for cloud-init
+  set_fact:
+    dev_share_export: "{{ dev_share_export_result.stdout | trim }}"
+    dev_share_access_name: "techsprint-{{ developer.slug }}"
+    dev_share_access_key: "{{ dev_share_key_result.stdout | trim }}"
+  no_log: true
+
+- name: Create database instance
+  os_server:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "vm-{{ prefix }}-{{ developer.slug }}-db"
+    image: "{{ db_image }}"
+    flavor: "{{ flavor_name }}"
+    nics:
+      - port-name: "port-{{ prefix }}-{{ developer.slug }}-db"
+    auto_ip: false
+    userdata: "{{ lookup('template', '../templates/cloud-init-db.yml.j2') }}"
+    meta:
+      project: techsprint
+      environment: "{{ environment_name }}"
+      owner: "{{ developer.slug }}"
+      role: database
+    timeout: 600
+  register: db_server
+  no_log: true
+
+- name: Create two Moodle application instances
+  os_server:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "vm-{{ prefix }}-{{ developer.slug }}-app{{ item }}"
+    image: "{{ app_image }}"
+    flavor: "{{ flavor_name }}"
+    nics:
+      - port-name: "port-{{ prefix }}-{{ developer.slug }}-app{{ item }}"
+    auto_ip: false
+    userdata: "{{ lookup('template', '../templates/cloud-init-app.yml.j2') }}"
+    meta:
+      project: techsprint
+      environment: "{{ environment_name }}"
+      owner: "{{ developer.slug }}"
+      role: moodle-app
+    timeout: 600
+  loop: [1, 2]
+  loop_control:
+    label: "app{{ item }}"
+  no_log: true
+
+- name: Create Cinder data volumes for all developer instances
+  os_volume:
+    auth: "{{ dev_auth }}"
+    state: present
+    display_name: "vol-{{ prefix }}-{{ developer.slug }}-{{ item }}-data"
+    display_description: "TechSprint second disk for {{ developer.slug }} {{ item }}"
+    size: 10
+    volume_type: "{{ volume_type }}"
+    metadata:
+      project: techsprint
+      environment: "{{ environment_name }}"
+      owner: "{{ developer.slug }}"
+  loop: [db, app1, app2]
+
+- name: Attach Cinder data volumes
+  os_server_volume:
+    auth: "{{ dev_auth }}"
+    state: present
+    server: "vm-{{ prefix }}-{{ developer.slug }}-{{ item }}"
+    volume: "vol-{{ prefix }}-{{ developer.slug }}-{{ item }}-data"
+    device: /dev/vdb
+  loop: [db, app1, app2]
+
+- name: Create internal Octavia load balancer with two members
+  os_loadbalancer:
+    auth: "{{ dev_auth }}"
+    state: present
+    name: "lb-{{ prefix }}-{{ developer.slug }}"
+    vip_subnet: "{{ dev_subnet }}"
+    vip_address: "10.40.{{ developer_zero_index + 1 }}.50"
+    auto_public_ip: false
+    listeners:
+      - name: "listener-{{ prefix }}-{{ developer.slug }}-http"
+        protocol: HTTP
+        protocol_port: 80
+        pool:
+          name: "pool-{{ prefix }}-{{ developer.slug }}-http"
+          protocol: HTTP
+          lb_algorithm: ROUND_ROBIN
+          members:
+            - name: "member-{{ prefix }}-{{ developer.slug }}-app1"
+              address: "{{ dev_app1_ip }}"
+              protocol_port: 80
+              subnet: "{{ dev_subnet }}"
+            - name: "member-{{ prefix }}-{{ developer.slug }}-app2"
+              address: "{{ dev_app2_ip }}"
+              protocol_port: 80
+              subnet: "{{ dev_subnet }}"
+    wait: true
+    timeout: 900

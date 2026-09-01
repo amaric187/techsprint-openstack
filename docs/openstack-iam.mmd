@@ -1,0 +1,13 @@
+flowchart TB
+  Keystone["Keystone"] --> LeadGroup["grp-techsprint-tst-leads"]
+  Keystone --> Dev1Group["Grupa developera 1"]
+  Keystone --> Dev2Group["Grupa developera 2"]
+  Keystone --> SwiftUsers["Swift servisni korisnici"]
+
+  LeadGroup -->|"member"| LeadProject["Lead projekt"]
+  LeadGroup -->|"member"| Dev1Project["Projekt developera 1"]
+  LeadGroup -->|"member"| Dev2Project["Projekt developera 2"]
+  Dev1Group -->|"member"| Dev1Project
+  Dev2Group -->|"member"| Dev2Project
+  SwiftUsers -->|"swiftoperator"| Storage["Vlastiti Swift container"]
+
